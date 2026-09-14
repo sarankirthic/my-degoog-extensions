@@ -32,6 +32,13 @@ export function createOsrmProvider({ baseUrl } = {}) {
     },
 
     async route(from, to, mode, { fetch: doFetch }) {
+      // The public demo server only hosts the driving/car profile — /foot/
+      // and /bike/ silently return the same result as /driving/ instead of
+      // erroring, which would misrepresent car-speed results as walking.
+      // Only trust non-drive profiles on a self-hosted instance.
+      if (usingPublicDemo && mode !== "drive") {
+        throw providerError("unavailable", `OSRM public demo server does not support the "${mode}" profile`);
+      }
       const profile = mode === "walk" ? "foot" : mode === "bike" ? "bike" : "driving";
       const coords = `${from.lon},${from.lat};${to.lon},${to.lat}`;
       const url = `${base}/route/v1/${profile}/${coords}?${new URLSearchParams({ overview: "full", geometries: "geojson", steps: "true" })}`;

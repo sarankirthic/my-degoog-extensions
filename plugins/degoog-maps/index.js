@@ -130,6 +130,11 @@ function sleep(ms) {
 const BLOCKED_QUERY_RE = /\b(?:recipe|lyrics|weather|stock|define|definition|download|install|error|debug|convert|translation|translate|tutorial|npm|python|javascript|typescript|react|docker|api|regex|movie|song|news)\b/i;
 const HINT_WORD_RE = /\b(?:bus|metro|train|directions?|routes?|distance)\b/i;
 const PIN_CODE_RE = /\b\d{6}\b/;
+// Major India metros/state capitals — lets a bare "chennai to bangalore" trigger
+// without a hint word, same role as the SG reference plugin's place-name list.
+// Not exhaustive by design (ladder: cover the common case, not every village);
+// smaller places still need a hint word or PIN code.
+const INDIA_PLACE_HINT_RE = /\b(?:mumbai|delhi|new delhi|bengaluru|bangalore|hyderabad|ahmedabad|chennai|kolkata|calcutta|surat|pune|jaipur|lucknow|kanpur|nagpur|indore|thane|bhopal|visakhapatnam|vizag|patna|vadodara|ghaziabad|ludhiana|agra|nashik|faridabad|meerut|rajkot|kalyan|vasai|varanasi|srinagar|aurangabad|dhanbad|amritsar|navi mumbai|allahabad|prayagraj|ranchi|howrah|coimbatore|jabalpur|gwalior|vijayawada|jodhpur|madurai|raipur|kota|guwahati|chandigarh|thiruvananthapuram|trivandrum|mysuru|mysore|kochi|cochin|bhubaneswar|dehradun|noida|gurugram|gurgaon)\b/i;
 
 const QUERY_PATTERNS = [
   { re: /^(?:directions?|routes?|maps?|distance)\s+from\s+(.+?)\s+to\s+(.+)$/i },
@@ -160,7 +165,7 @@ export function parseDirectionsQuery(query) {
 }
 
 function hasIndiaRouteHint(raw, from, to) {
-  return HINT_WORD_RE.test(raw) || PIN_CODE_RE.test(from) || PIN_CODE_RE.test(to);
+  return HINT_WORD_RE.test(raw) || PIN_CODE_RE.test(from) || PIN_CODE_RE.test(to) || INDIA_PLACE_HINT_RE.test(raw);
 }
 
 function normalize(value) {

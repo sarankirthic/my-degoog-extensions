@@ -20,9 +20,17 @@ export function normalizeOsrmStyleRoute(route, mode, providerId) {
     mode,
     durationSeconds: Math.round(route.duration),
     distanceMeters: Math.round(route.distance),
-    geometry: route.geometry,
+    geometry: { ...route.geometry, coordinates: samplePoints(route.geometry?.coordinates || [], 140) },
     steps: extractSteps(route),
   };
+}
+
+// Long-distance routes can come back with thousands of points; the map only
+// needs enough to look smooth, not every raw coordinate.
+function samplePoints(points, maxPoints) {
+  if (points.length <= maxPoints) return points;
+  const step = (points.length - 1) / (maxPoints - 1);
+  return Array.from({ length: maxPoints }, (_, i) => points[Math.round(i * step)]);
 }
 
 function extractSteps(route) {
