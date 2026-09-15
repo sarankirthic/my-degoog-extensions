@@ -1,7 +1,7 @@
 {
     "name": "my-degoog-extensions",
     "description": "My personal plugins, themes, engines, and transports for degoog search.",
-    "repo-image": "https://avatars.githubusercontent.com/u/59786553?v=4",
+    "repo-image": "img.jpeg",
     "author": "sarankirthic",
     "type": "module",
     "plugins": [
@@ -9,7 +9,7 @@
             "path": "plugins/degoog-maps",
             "name": "Degoog Maps",
             "description": "India-first multimodal directions: driving, walking, bus/metro and train.",
-            "version": "1.1.0",
+            "version": "1.2.0",
             "type": "slots",
             "minDegoogVersion": "0.23.0"
         }

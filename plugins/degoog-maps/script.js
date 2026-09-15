@@ -5,15 +5,16 @@
       btn.classList.toggle("dgm-tab-active", active);
       btn.setAttribute("aria-selected", active ? "true" : "false");
     });
-    root.querySelectorAll("[data-dgm-route]").forEach((card) => {
-      card.hidden = !(mode === "all" || card.getAttribute("data-mode") === mode);
+    root.querySelectorAll("[data-dgm-panel]").forEach((panel) => {
+      panel.hidden = panel.getAttribute("data-dgm-panel") !== mode;
     });
     selectFirstVisibleRoute(root);
   }
 
   function selectFirstVisibleRoute(root) {
-    const firstVisible = [...root.querySelectorAll("[data-dgm-route]")].find((c) => !c.hidden);
-    if (firstVisible) selectRoute(root, firstVisible);
+    const visiblePanel = root.querySelector("[data-dgm-panel]:not([hidden])");
+    const firstCard = visiblePanel?.querySelector("[data-dgm-route]");
+    if (firstCard) selectRoute(root, firstCard);
   }
 
   let leafletPromise = null;
@@ -90,8 +91,8 @@
   }
 
   function init(root) {
-    if (root.dataset.bhdReady === "true") return;
-    root.dataset.bhdReady = "true";
+    if (root.dataset.dgmReady === "true") return;
+    root.dataset.dgmReady = "true";
 
     root.addEventListener("click", (event) => {
       const tab = event.target.closest("[data-dgm-filter]");

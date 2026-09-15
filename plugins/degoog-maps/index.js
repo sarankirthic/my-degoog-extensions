@@ -1,16 +1,17 @@
 import { readFileSync } from "node:fs";
 import { createMapplsProvider } from "./providers/india/routing/mappls.js";
 import { createOsrmProvider } from "./providers/india/routing/osrm.js";
+import { createBusmapsProvider } from "./providers/india/transit/busmaps.js";
 import { createOsmTileProvider } from "./providers/india/tiles/osm.js";
 import { createMapplsTileProvider } from "./providers/india/tiles/mappls.js";
 import { ProviderError } from "./providers/shared.js";
 
 // Degoog Maps — India-first multimodal directions slot (ARCHITECTURE.md).
-// M1 scope only: driving/walking routing + geocoding + map slot, per the
-// build order in ARCHITECTURE.md §10. Transit (busmaps, M2), rail (RailKit,
-// M3) and the direct-GTFS fallback (M4) are follow-on milestones — no
-// TransitProvider/RailProvider exists yet, so this plugin does not declare
-// routes or trigger patterns for them.
+// M1+M2 scope: driving/walking routing + geocoding + map slot (M1), plus
+// bus/metro trip planning via busmaps (M2), per the build order in
+// ARCHITECTURE.md §10. Rail (RailKit, M3) and the direct-GTFS fallback (M4)
+// remain follow-on milestones — no RailProvider exists yet, so this plugin
+// does not declare routes or trigger patterns for it.
 
 const PLUGIN_ID = "degoog-maps";
 const PLUGIN_NAME = "Degoog Maps";
@@ -18,12 +19,21 @@ const PLUGIN_VERSION = "1.0.0";
 
 const GEOCODE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // §7: place → coordinates rarely changes
 const ROUTE_TTL_MS = 10 * 60 * 1000; // §7: traffic-aware routes shift, but not query-to-query
+// §7 labels this namespace "transit:static" (~24h, "GTFS static schedules")
+// but busmaps' planTrip is a live, time-bound itinerary for "now" (no
+// departureTime param sent), not a static timetable — caching that for 24h
+// would silently serve a stale trip plan. Using route:drive/walk's shorter
+// reasoning instead: itinerary options shift, but not query-to-query.
+const TRANSIT_PLANTRIP_TTL_MS = 10 * 60 * 1000;
+const TRANSIT_DEPARTURES_TTL_MS = 25 * 1000; // §7 transit:realtime, matches the SG reference plugin's LTA cadence
 const MODES = ["drive", "walk"];
 
 let _settings = {
   mapplsApiKey: "",
   enableOsrmFallback: true,
   osrmBaseUrl: "",
+  busmapsApiKey: "",
+  transitMaxRoutes: "2",
   tileSource: "osm",
   debugMode: false,
 };
@@ -52,6 +62,8 @@ function _configure(settings = {}) {
     mapplsApiKey: String(merged.mapplsApiKey || "").trim(),
     enableOsrmFallback: merged.enableOsrmFallback !== false && merged.enableOsrmFallback !== "false",
     osrmBaseUrl: String(merged.osrmBaseUrl || "").trim(),
+    busmapsApiKey: String(merged.busmapsApiKey || "").trim(),
+    transitMaxRoutes: ["1", "2", "3"].includes(String(merged.transitMaxRoutes)) ? String(merged.transitMaxRoutes) : "2",
     tileSource: merged.tileSource === "mappls" ? "mappls" : "osm",
     debugMode: merged.debugMode === true || merged.debugMode === "true",
   };
@@ -93,6 +105,12 @@ function tileProviders() {
     osm: createOsmTileProvider(),
     mappls: createMapplsTileProvider({ apiKey: _settings.mapplsApiKey }),
   };
+}
+
+function transitProviders() {
+  // Just busmaps for now — gtfs-direct is M4 (§3.1.2: needs its own
+  // itinerary-building layer, not a one-line adapter).
+  return [createBusmapsProvider({ apiKey: _settings.busmapsApiKey, maxRoutes: _settings.transitMaxRoutes })];
 }
 
 // Provider fallback executor — ARCHITECTURE.md §4.
@@ -226,12 +244,15 @@ async function lookupDirections(fromPlace, toPlace, ctx = {}) {
 
   const [fromGeo, toGeo] = await Promise.all([geocodeOne(from, fetchCtx), geocodeOne(to, fetchCtx)]);
   if (!fromGeo || !toGeo) {
-    return { from, to, fromGeo, toGeo, routes: [], warning: !fromGeo ? `Could not find "${from}".` : `Could not find "${to}".` };
+    return { from, to, fromGeo, toGeo, routes: [], transit: [], warning: !fromGeo ? `Could not find "${from}".` : `Could not find "${to}".` };
   }
+
+  const originKey = `${fromGeo.point.lat.toFixed(5)},${fromGeo.point.lon.toFixed(5)}`;
+  const destKey = `${toGeo.point.lat.toFixed(5)},${toGeo.point.lon.toFixed(5)}`;
 
   const routes = [];
   for (const mode of MODES) {
-    const cacheKey = `route:${mode}:${fromGeo.point.lat.toFixed(5)},${fromGeo.point.lon.toFixed(5)}:${toGeo.point.lat.toFixed(5)},${toGeo.point.lon.toFixed(5)}`;
+    const cacheKey = `route:${mode}:${originKey}:${destKey}`;
     const cached = _cache ? await _cache.get(cacheKey) : null;
     if (cached) {
       routes.push(...cached);
@@ -245,8 +266,23 @@ async function lookupDirections(fromPlace, toPlace, ctx = {}) {
       _log({ capability: `route:${mode}`, provider: "*", operation: "route", outcome: "exhausted", error_class: err instanceof ProviderError ? err.kind : "unknown" });
     }
   }
-
   routes.sort((a, b) => a.durationSeconds - b.durationSeconds);
+
+  const transit = [];
+  const transitCacheKey = `transit:busmaps:${originKey}:${destKey}`;
+  const cachedTransit = _cache ? await _cache.get(transitCacheKey) : null;
+  if (cachedTransit) {
+    transit.push(...cachedTransit);
+  } else {
+    try {
+      const { result } = await callWithFallback(transitProviders(), "transit:planTrip", "planTrip", [fromGeo.point, toGeo.point, fetchCtx]);
+      if (_cache) await _cache.set(transitCacheKey, result, TRANSIT_PLANTRIP_TTL_MS);
+      transit.push(...result);
+    } catch (err) {
+      _log({ capability: "transit:planTrip", provider: "*", operation: "planTrip", outcome: "exhausted", error_class: err instanceof ProviderError ? err.kind : "unknown" });
+    }
+  }
+  transit.sort((a, b) => a.durationSeconds - b.durationSeconds);
 
   return {
     from,
@@ -254,75 +290,153 @@ async function lookupDirections(fromPlace, toPlace, ctx = {}) {
     fromGeo,
     toGeo,
     routes,
-    warning: routes.length ? null : "No drive or walk route found between these points.",
+    transit,
+    warning: routes.length || transit.length ? null : "No drive, walk, bus or metro route found between these points.",
   };
 }
 
 // ── HTML rendering ─────────────────────────────────────────────────────────
+// RouteResult and TransitItinerary (§3.1) are different shapes; this is the
+// one place they get flattened into a common "card" for the tab/list/map UI.
+
+const MODE_BADGES = { drive: "DRIVE", walk: "WALK", bus: "BUS", metro: "METRO" };
+const MODE_TITLES = { drive: "Driving", walk: "Walking", bus: "Bus", metro: "Metro" };
+
+function buildCards(payload) {
+  const routeCards = payload.routes.map((r) => ({
+    kind: "route",
+    mode: r.mode,
+    provider: r.provider,
+    durationSeconds: r.durationSeconds,
+    distanceMeters: r.distanceMeters,
+    geometry: r.geometry,
+    steps: r.steps,
+  }));
+  const transitCards = payload.transit.map((t) => ({
+    kind: "transit",
+    mode: classifyTransitMode(t),
+    provider: t.provider,
+    durationSeconds: t.durationSeconds,
+    legs: t.legs,
+    fare: t.fare,
+  }));
+  return [...routeCards, ...transitCards].sort((a, b) => a.durationSeconds - b.durationSeconds);
+}
+
+// Tabs only go up to Bus/Metro (no dedicated Tram tab yet); a tram-only
+// itinerary is bucketed under Bus rather than dropped.
+function classifyTransitMode(itinerary) {
+  return (itinerary.legs || []).some((leg) => leg.mode === "metro") ? "metro" : "bus";
+}
+
+const TAB_ORDER = ["drive", "walk", "bus", "metro"];
+
+function groupByMode(cards) {
+  const map = new Map();
+  for (const card of cards) {
+    if (!map.has(card.mode)) map.set(card.mode, []);
+    map.get(card.mode).push(card);
+  }
+  return map;
+}
 
 function renderDirectionsCard(payload) {
-  const best = payload.routes[0];
-  const tabs = renderTabs(payload.routes);
-  const routeCards = payload.routes.map((route, idx) => renderRoute(route, idx)).join("\n");
-  const emptyState = payload.routes.length ? "" : `<p class="dgm-empty">${esc(payload.warning || "No routes found.")}</p>`;
+  const cards = buildCards(payload);
+  const best = cards[0];
+  const byMode = groupByMode(cards);
+  const modesPresent = TAB_ORDER.filter((m) => byMode.has(m));
+  const activeMode = best ? best.mode : modesPresent[0];
+  const bestMeta = best ? [MODE_TITLES[best.mode] || best.mode, formatDuration(best.durationSeconds), formatDistance(best.distanceMeters)].filter(Boolean).join(" · ") : "";
+  const providers = [...new Set(cards.map((c) => c.provider))];
+  const emptyState = cards.length ? "" : `<p class="dgm-empty">${esc(payload.warning || "No routes found.")}</p>`;
 
   return `
 <div class="dgm-wrap slot-full-width" data-dgm-version="${PLUGIN_VERSION}" data-dgm-root>
   <div class="dgm-header">
     <div class="dgm-heading-block">
-      <div class="dgm-kicker">India directions</div>
-      <h2 class="dgm-title">${esc(payload.from)} <span aria-hidden="true">→</span> ${esc(payload.to)}</h2>
-      ${best ? `<p class="dgm-subtitle">Fastest: ${esc(best.mode)} · ${formatDuration(best.durationSeconds)} · ${formatDistance(best.distanceMeters)}</p>` : ""}
+      <h2 class="dgm-title">Maps</h2>
+      <p class="dgm-subtitle">${esc(payload.from)} <span aria-hidden="true">→</span> ${esc(payload.to)}${best ? ` · Fastest: ${esc(bestMeta)}` : ""}</p>
     </div>
   </div>
   <div class="dgm-shell">
     <section class="dgm-results-panel">
-      ${tabs}
-      <div class="dgm-grid" data-dgm-route-list>${routeCards}</div>
+      ${renderTabs(modesPresent, activeMode)}
+      ${modesPresent.map((mode) => renderPanel(mode, byMode.get(mode), cards, mode === activeMode)).join("\n")}
       ${emptyState}
     </section>
     <aside class="dgm-map-panel" aria-label="Selected route map">
       <div data-dgm-map-frame>${renderMiniMapBlock(best)}</div>
-      ${payload.routes.map((route, idx) => `<template data-dgm-map-template="${idx}">${renderMiniMapBlock(route)}</template>`).join("\n")}
+      ${cards.map((card, idx) => `<template data-dgm-map-template="${idx}">${renderMiniMapBlock(card)}</template>`).join("\n")}
     </aside>
   </div>
-  <p class="dgm-note">Routes from ${esc(payload.routes.map((r) => r.provider).filter((v, i, a) => a.indexOf(v) === i).join(", ") || "configured providers")}. Bus/metro and train coverage ship in a later milestone.</p>
+  <p class="dgm-note">Routes from ${esc(providers.join(", ") || "configured providers")}. Train coverage ships in a later milestone.</p>
 </div>`;
 }
 
-function renderTabs(routes) {
-  const modes = [...new Set(routes.map((r) => r.mode))];
-  const buttons = [["all", "All"], ["drive", "Drive"], ["walk", "Walk"]].filter(([mode]) => mode === "all" || modes.includes(mode));
-  return `<div class="dgm-tabs" role="tablist" aria-label="Route filters">
-    ${buttons.map(([mode, label], idx) => `<button type="button" class="dgm-tab${idx === 0 ? " dgm-tab-active" : ""}" data-dgm-filter="${esc(mode)}" role="tab" aria-selected="${idx === 0 ? "true" : "false"}">${esc(label)}</button>`).join("")}
+function renderTabs(modesPresent, activeMode) {
+  return `<div class="dgm-tabs" role="tablist" aria-label="Route mode">
+    ${modesPresent.map((mode) => `<button type="button" class="dgm-tab${mode === activeMode ? " dgm-tab-active" : ""}" data-dgm-filter="${esc(mode)}" role="tab" aria-selected="${mode === activeMode ? "true" : "false"}" id="dgm-tab-${esc(mode)}" aria-controls="dgm-panel-${esc(mode)}">${esc(MODE_TITLES[mode] || mode)}</button>`).join("")}
   </div>`;
 }
 
-function renderRoute(route, idx) {
-  const meta = [formatDuration(route.durationSeconds), formatDistance(route.distanceMeters)].map((x) => `<span>${esc(x)}</span>`).join("");
-  const steps = (route.steps || []).slice(0, 10).map((s) => `<li>${esc(s.text)}</li>`).join("");
-  return `<article class="dgm-route dgm-${esc(route.mode)}${idx === 0 ? " dgm-route-selected" : ""}" data-dgm-route data-mode="${esc(route.mode)}" data-map-key="${idx}" tabindex="0" role="button" aria-label="Show ${esc(route.mode)} route on the map">
+// Each mode gets its own tabpanel (only the active one is visible) instead
+// of one flat list filtered by hiding non-matching cards.
+function renderPanel(mode, modeCards, allCards, isActive) {
+  const cardsHtml = modeCards.map((card) => renderRoute(card, allCards.indexOf(card), card === modeCards[0])).join("\n");
+  return `<div class="dgm-grid" id="dgm-panel-${esc(mode)}" role="tabpanel" aria-labelledby="dgm-tab-${esc(mode)}" data-dgm-panel="${esc(mode)}" ${isActive ? "" : "hidden"}>${cardsHtml}</div>`;
+}
+
+function renderRoute(card, mapKey, isFirstInPanel) {
+  const fareText = card.fare ? formatFare(card.fare) : "";
+  const meta = [formatDuration(card.durationSeconds), formatDistance(card.distanceMeters), fareText].filter(Boolean).map((x) => `<span>${esc(x)}</span>`).join("");
+  const badge = MODE_BADGES[card.mode] || card.mode.toUpperCase();
+  const title = MODE_TITLES[card.mode] || card.mode;
+  const detailLabel = card.kind === "transit" ? "Legs" : "Turn-by-turn";
+  const detail = card.kind === "transit" ? renderTransitLegs(card.legs) : renderSteps(card.steps);
+  return `<article class="dgm-route dgm-${esc(card.mode)}${isFirstInPanel ? " dgm-route-selected" : ""}" data-dgm-route data-mode="${esc(card.mode)}" data-map-key="${mapKey}" tabindex="0" role="button" aria-label="Show ${esc(title)} route on the map">
     <div class="dgm-route-top">
-      <span class="dgm-mode-badge" aria-hidden="true">${route.mode === "drive" ? "DRIVE" : "WALK"}</span>
+      <span class="dgm-mode-badge" aria-hidden="true">${esc(badge)}</span>
       <div class="dgm-route-main">
-        <h3>${esc(route.mode === "drive" ? "Driving" : "Walking")} <span class="dgm-source-badge">via ${esc(route.provider)}</span></h3>
+        <h3>${esc(title)} <span class="dgm-source-badge">via ${esc(card.provider)}</span></h3>
         <div class="dgm-meta">${meta}</div>
       </div>
     </div>
-    <details class="dgm-details" ${idx === 0 ? "open" : ""}>
-      <summary>Turn-by-turn</summary>
-      <ol class="dgm-steps">${steps}</ol>
+    <details class="dgm-details" ${isFirstInPanel ? "open" : ""}>
+      <summary>${esc(detailLabel)}</summary>
+      ${detail}
     </details>
   </article>`;
 }
 
-function renderMiniMapBlock(route) {
-  if (!route || !route.geometry?.coordinates?.length) {
+function renderSteps(steps) {
+  const items = (steps || []).slice(0, 10).map((s) => `<li>${esc(s.text)}</li>`).join("");
+  return `<ol class="dgm-steps">${items}</ol>`;
+}
+
+// Leg-level route/agency/stop names are best-effort (providers/india/transit/busmaps.js
+// extracts them defensively — the public busmaps docs don't confirm exact field names).
+function renderTransitLegs(legs) {
+  const items = (legs || []).map((leg) => {
+    const label = [MODE_TITLES[leg.mode] || leg.mode, leg.routeName, leg.agency].filter(Boolean).join(" · ");
+    const stops = leg.fromStop && leg.toStop ? `${esc(leg.fromStop.name)} → ${esc(leg.toStop.name)}` : "";
+    const dur = formatDuration(leg.durationSeconds);
+    return `<li>${esc(label)}${stops ? ` — ${stops}` : ""}${dur ? ` (${esc(dur)})` : ""}</li>`;
+  }).join("");
+  return `<ol class="dgm-steps">${items}</ol>`;
+}
+
+function formatFare(fare) {
+  if (!fare || !Number.isFinite(fare.amount)) return "";
+  return `${fare.isEstimate ? "~" : ""}${fare.currency} ${fare.amount % 1 ? fare.amount.toFixed(2) : fare.amount}`;
+}
+
+function renderMiniMapBlock(card) {
+  if (!card || !card.geometry?.coordinates?.length) {
     return `<div class="dgm-map-empty">Map preview unavailable for this route.</div>`;
   }
   const apiBase = _apiBase || `/api/plugin/${PLUGIN_ID}`;
   const tileUrl = `${apiBase}/tile?provider=${esc(_settings.tileSource)}&z={z}&x={x}&y={y}`;
-  const points = route.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+  const points = card.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
   const geomJson = esc(JSON.stringify(points));
   return `<div class="dgm-leaflet-wrap">
     <div class="dgm-leaflet-map" data-geom="${geomJson}" data-tile-url="${esc(tileUrl)}"></div>
@@ -394,6 +508,21 @@ export const slot = {
       description: "Self-hosted OSRM instance. Leave blank to use the public demo server — not rate-limit-free and not production-safe.",
     },
     {
+      key: "busmapsApiKey",
+      label: "busmaps API key",
+      type: "password",
+      secret: true,
+      description: "Bus/metro trip planning and next departures (busmaps.com/en/developers). Used server-side only. Without a key, the Bus/Metro tabs simply don't appear.",
+    },
+    {
+      key: "transitMaxRoutes",
+      label: "Transit routes per query",
+      type: "select",
+      options: ["1", "2", "3"],
+      default: "2",
+      description: "Maximum bus/metro itineraries requested per lookup.",
+    },
+    {
       key: "tileSource",
       label: "Map tile source",
       type: "select",
@@ -431,7 +560,7 @@ export const slot = {
     if (!parsed) return { html: "" };
     try {
       const payload = await lookupDirections(parsed.from, parsed.to, context);
-      if (!payload.routes.length) return { html: "" };
+      if (!payload.routes.length && !payload.transit.length) return { html: "" };
       return { title: `${payload.from} to ${payload.to}`, html: renderDirectionsCard(payload) };
     } catch (err) {
       _log({ capability: "slot.execute", outcome: "error", error_class: err instanceof ProviderError ? err.kind : "unknown" });
@@ -505,6 +634,33 @@ export const routes = [
         });
       } catch (err) {
         return new Response(err instanceof Error ? err.message : String(err), { status: 500 });
+      }
+    },
+  },
+  {
+    method: "get",
+    path: "transit/departures",
+    handler: async (request) => {
+      try {
+        _loadSettingsFallback();
+        const url = new URL(request.url);
+        const lat = Number(url.searchParams.get("lat"));
+        const lon = Number(url.searchParams.get("lon"));
+        const radius = Number(url.searchParams.get("radius")) || 500;
+        if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+          return jsonResponse({ error: "Missing or invalid required query params: lat, lon" }, 400);
+        }
+        if (!transitProviders().some((p) => p.isConfigured())) {
+          return jsonResponse({ error: "No transit provider configured" }, 503);
+        }
+        const cacheKey = `transit:busmaps:departures:${lat.toFixed(5)},${lon.toFixed(5)}:${radius}`;
+        const cached = _cache ? await _cache.get(cacheKey) : null;
+        if (cached) return jsonResponse({ lat, lon, departures: cached, cached: true });
+        const { result } = await callWithFallback(transitProviders(), "transit:nextDepartures", "nextDepartures", [{ lat, lon }, { fetch: _fetch }, radius]);
+        if (_cache) await _cache.set(cacheKey, result, TRANSIT_DEPARTURES_TTL_MS);
+        return jsonResponse({ lat, lon, departures: result });
+      } catch (err) {
+        return jsonResponse({ error: err instanceof Error ? err.message : String(err) }, 500);
       }
     },
   },
