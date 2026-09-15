@@ -24,15 +24,20 @@
   function loadLeaflet() {
     if (window.L) return Promise.resolve();
     if (leafletPromise) return leafletPromise;
-    leafletPromise = new Promise((resolve) => {
+    leafletPromise = new Promise((resolve, reject) => {
       const link = document.createElement("link");
       link.rel = "stylesheet";
       link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
       document.head.appendChild(link);
       const script = document.createElement("script");
       script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
-      script.onload = resolve;
+      const timeoutId = setTimeout(() => reject(new Error("Leaflet load timed out (network or Content-Security-Policy likely blocked unpkg.com)")), 8000);
+      script.onload = () => { clearTimeout(timeoutId); resolve(); };
+      script.onerror = () => { clearTimeout(timeoutId); reject(new Error("Leaflet failed to load from unpkg.com (blocked or unreachable)")); };
       document.head.appendChild(script);
+    }).catch((err) => {
+      leafletPromise = null; // allow a later route selection to retry instead of hanging on a cached rejection forever
+      throw err;
     });
     return leafletPromise;
   }
@@ -56,7 +61,12 @@
     const tileUrl = mapDiv.getAttribute("data-tile-url") || "";
     if (!geom.length || !tileUrl) return;
 
-    await loadLeaflet();
+    try {
+      await loadLeaflet();
+    } catch (err) {
+      mapDiv.replaceWith(Object.assign(document.createElement("div"), { className: "dgm-map-empty", textContent: "Map unavailable: " + err.message }));
+      return;
+    }
     const L = window.L;
     if (!L) return;
 
