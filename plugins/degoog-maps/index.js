@@ -12,6 +12,12 @@ import { ProviderError } from "./providers/shared.js";
 // ARCHITECTURE.md §10. Rail (RailKit, M3) and the direct-GTFS fallback (M4)
 // remain follow-on milestones — no RailProvider exists yet, so this plugin
 // does not declare routes or trigger patterns for it.
+//
+// Temporarily narrowed to Drive only (walk + bus/metro paused, not removed):
+// get one mode fully correct end to end before re-widening. Flip MODES and
+// TRANSIT_ENABLED below to bring walk/transit back — the busmaps provider,
+// transit/departures route and rendering all still work, they're just not
+// being called right now.
 
 const PLUGIN_ID = "degoog-maps";
 const PLUGIN_NAME = "Degoog Maps";
@@ -26,7 +32,8 @@ const ROUTE_TTL_MS = 10 * 60 * 1000; // §7: traffic-aware routes shift, but not
 // reasoning instead: itinerary options shift, but not query-to-query.
 const TRANSIT_PLANTRIP_TTL_MS = 10 * 60 * 1000;
 const TRANSIT_DEPARTURES_TTL_MS = 25 * 1000; // §7 transit:realtime, matches the SG reference plugin's LTA cadence
-const MODES = ["drive", "walk"];
+const MODES = ["drive"]; // walk paused — see header note
+const TRANSIT_ENABLED = false; // bus/metro paused — see header note
 
 let _settings = {
   mapplsApiKey: "",
@@ -269,20 +276,22 @@ async function lookupDirections(fromPlace, toPlace, ctx = {}) {
   routes.sort((a, b) => a.durationSeconds - b.durationSeconds);
 
   const transit = [];
-  const transitCacheKey = `transit:busmaps:${originKey}:${destKey}`;
-  const cachedTransit = _cache ? await _cache.get(transitCacheKey) : null;
-  if (cachedTransit) {
-    transit.push(...cachedTransit);
-  } else {
-    try {
-      const { result } = await callWithFallback(transitProviders(), "transit:planTrip", "planTrip", [fromGeo.point, toGeo.point, fetchCtx]);
-      if (_cache) await _cache.set(transitCacheKey, result, TRANSIT_PLANTRIP_TTL_MS);
-      transit.push(...result);
-    } catch (err) {
-      _log({ capability: "transit:planTrip", provider: "*", operation: "planTrip", outcome: "exhausted", error_class: err instanceof ProviderError ? err.kind : "unknown" });
+  if (TRANSIT_ENABLED) {
+    const transitCacheKey = `transit:busmaps:${originKey}:${destKey}`;
+    const cachedTransit = _cache ? await _cache.get(transitCacheKey) : null;
+    if (cachedTransit) {
+      transit.push(...cachedTransit);
+    } else {
+      try {
+        const { result } = await callWithFallback(transitProviders(), "transit:planTrip", "planTrip", [fromGeo.point, toGeo.point, fetchCtx]);
+        if (_cache) await _cache.set(transitCacheKey, result, TRANSIT_PLANTRIP_TTL_MS);
+        transit.push(...result);
+      } catch (err) {
+        _log({ capability: "transit:planTrip", provider: "*", operation: "planTrip", outcome: "exhausted", error_class: err instanceof ProviderError ? err.kind : "unknown" });
+      }
     }
+    transit.sort((a, b) => a.durationSeconds - b.durationSeconds);
   }
-  transit.sort((a, b) => a.durationSeconds - b.durationSeconds);
 
   return {
     from,
@@ -291,7 +300,7 @@ async function lookupDirections(fromPlace, toPlace, ctx = {}) {
     toGeo,
     routes,
     transit,
-    warning: routes.length || transit.length ? null : "No drive, walk, bus or metro route found between these points.",
+    warning: routes.length || transit.length ? null : "No drive route found between these points.",
   };
 }
 
@@ -369,7 +378,7 @@ function renderDirectionsCard(payload) {
       ${cards.map((card, idx) => `<template data-dgm-map-template="${idx}">${renderMiniMapBlock(card)}</template>`).join("\n")}
     </aside>
   </div>
-  <p class="dgm-note">Routes from ${esc(providers.join(", ") || "configured providers")}. Train coverage ships in a later milestone.</p>
+  <p class="dgm-note">Routes from ${esc(providers.join(", ") || "configured providers")}. Walk, bus/metro and train coverage are temporarily paused while driving directions are perfected first.</p>
 </div>`;
 }
 
