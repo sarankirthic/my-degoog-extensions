@@ -8,7 +8,7 @@
         {
             "path": "plugins/degoog-maps",
             "name": "Degoog Maps",
-            "description": "India-first multimodal directions: driving, walking, bus/metro and train.",
+            "description": "India-first multimodal directions: driving now, walking/bus/metro/train being rolled out one mode at a time.",
             "version": "1.2.1",
             "type": "slots",
             "minDegoogVersion": "0.23.0"

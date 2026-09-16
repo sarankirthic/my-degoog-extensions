@@ -51,7 +51,7 @@ let _apiBase = "";
 export const plugin = {
   id: PLUGIN_ID,
   name: PLUGIN_NAME,
-  description: "India-first multimodal directions: driving, walking, bus/metro and train.",
+  description: "India-first multimodal directions: driving now, walking/bus/metro/train being rolled out one mode at a time.",
   version: PLUGIN_VERSION,
 };
 
@@ -81,7 +81,11 @@ function _loadSettingsFallback() {
   for (const file of ["/app/data/plugin-settings.json", "./data/plugin-settings.json"]) {
     try {
       const data = JSON.parse(readFileSync(file, "utf8"));
-      if (data[PLUGIN_ID]) {
+      // Only adopt the file's settings if it actually has the specific key
+      // we're missing — otherwise this would silently reset every other
+      // already-configured field (debugMode, busmapsApiKey, ...) back to
+      // file-or-default values on every request that reaches this fallback.
+      if (data[PLUGIN_ID]?.mapplsApiKey) {
         _configure(data[PLUGIN_ID]);
         return;
       }
@@ -224,15 +228,20 @@ function parseMaybeCoord(value) {
 
 // ── Directions lookup ──────────────────────────────────────────────────────
 
+// §7 cache key format is geocode:{provider}:{query} — deliberately per-provider
+// (not one shared key) so switching providers (e.g. adding a Mappls key) isn't
+// stuck serving whatever the other provider cached for up to 7 days.
 async function geocodeOne(place, ctx) {
   const coord = parseMaybeCoord(place);
   if (coord) return { label: place, point: coord };
 
-  const cacheKey = `geocode:${place.toLowerCase()}`;
+  const providers = routingProviders();
+  const configuredIds = providers.filter((p) => !p.isConfigured || p.isConfigured()).map((p) => p.id);
+  const cacheKey = `geocode:${configuredIds.join("+")}:${place.toLowerCase()}`;
   const cached = _cache ? await _cache.get(cacheKey) : null;
   if (cached) return cached;
 
-  const { result } = await callWithFallback(routingProviders(), "geocode", "geocode", [place, ctx]);
+  const { result } = await callWithFallback(providers, "geocode", "geocode", [place, ctx]);
   const best = result[0] || null;
   if (best && _cache) await _cache.set(cacheKey, best, GEOCODE_TTL_MS);
   return best;
@@ -257,16 +266,21 @@ async function lookupDirections(fromPlace, toPlace, ctx = {}) {
   const originKey = `${fromGeo.point.lat.toFixed(5)},${fromGeo.point.lon.toFixed(5)}`;
   const destKey = `${toGeo.point.lat.toFixed(5)},${toGeo.point.lon.toFixed(5)}`;
 
+  const routingChain = routingProviders();
+  const routingProviderIds = routingChain.filter((p) => !p.isConfigured || p.isConfigured()).map((p) => p.id).join("+");
+
   const routes = [];
   for (const mode of MODES) {
-    const cacheKey = `route:${mode}:${originKey}:${destKey}`;
+    // §7 format: route:{provider}:{mode}:{from}:{to} — provider set is part of
+    // the key for the same reason as geocode's (see geocodeOne comment above).
+    const cacheKey = `route:${routingProviderIds}:${mode}:${originKey}:${destKey}`;
     const cached = _cache ? await _cache.get(cacheKey) : null;
     if (cached) {
       routes.push(...cached);
       continue;
     }
     try {
-      const { result } = await callWithFallback(routingProviders(), `route:${mode}`, "route", [fromGeo.point, toGeo.point, mode, fetchCtx]);
+      const { result } = await callWithFallback(routingChain, `route:${mode}`, "route", [fromGeo.point, toGeo.point, mode, fetchCtx]);
       if (_cache) await _cache.set(cacheKey, result, ROUTE_TTL_MS);
       routes.push(...result);
     } catch (err) {
@@ -612,7 +626,16 @@ export const routes = [
         const q = (url.searchParams.get("q") || "").trim();
         if (!q || q.length > 200) return jsonResponse({ error: "Missing or invalid required query param: q" }, 400);
         _loadSettingsFallback();
-        const { result } = await callWithFallback(routingProviders(), "geocode", "geocode", [q, { fetch: _fetch }]);
+        // Cached (not just an internal-lookup convenience): Nominatim's usage
+        // policy explicitly requires caching repeated identical queries, and
+        // this route is exactly the kind of thing an autocomplete UI would hit.
+        const providers = routingProviders();
+        const configuredIds = providers.filter((p) => !p.isConfigured || p.isConfigured()).map((p) => p.id).join("+");
+        const cacheKey = `geocode:${configuredIds}:${q.toLowerCase()}:list`;
+        const cached = _cache ? await _cache.get(cacheKey) : null;
+        if (cached) return jsonResponse({ query: q, results: cached, cached: true });
+        const { result } = await callWithFallback(providers, "geocode", "geocode", [q, { fetch: _fetch }]);
+        if (_cache) await _cache.set(cacheKey, result, GEOCODE_TTL_MS);
         return jsonResponse({ query: q, results: result });
       } catch (err) {
         return jsonResponse({ error: err instanceof Error ? err.message : String(err) }, 500);
