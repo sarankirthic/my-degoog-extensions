@@ -12,6 +12,14 @@
             "version": "1.2.1",
             "type": "slots",
             "minDegoogVersion": "0.23.0"
+        },
+        {
+            "path": "plugins/calendar",
+            "name": "Calendar",
+            "description": "Local date/agenda utility — !calendar today, !calendar tomorrow 3pm dentist.",
+            "version": "0.1.0",
+            "type": "commands",
+            "minDegoogVersion": "0.23.0"
         }
     ]
 }

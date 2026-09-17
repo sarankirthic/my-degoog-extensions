@@ -1,5 +1,7 @@
 .idea/
 *.DS_Store
+node_modules/
 
 ARCHITECTURE.md
 CLAUDE.md
+CALENDER.md

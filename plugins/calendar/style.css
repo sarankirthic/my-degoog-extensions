@@ -1,0 +1,91 @@
+/* Scoped under .calendar-plugin to avoid clashing with other plugins/host
+   styles. Uses the host's CSS variables where the Styling page documents
+   them (var(--text-primary) etc.) — double-check exact variable names
+   against that page and adjust if any of these don't resolve. */
+
+.calendar-plugin {
+  font-family: inherit;
+  color: var(--text-primary, inherit);
+}
+
+.calendar-plugin__title {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.calendar-plugin__empty {
+  margin: 0;
+  color: var(--text-secondary, #888);
+  font-size: 0.9rem;
+}
+
+.calendar-plugin__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.calendar-plugin__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  background: var(--bg-secondary, rgba(127, 127, 127, 0.08));
+  border: 1px solid var(--border-color, rgba(127, 127, 127, 0.2));
+}
+
+.calendar-plugin__item-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.calendar-plugin__item-time {
+  font-size: 0.78rem;
+  color: var(--text-secondary, #888);
+}
+
+.calendar-plugin__item-title {
+  font-size: 0.95rem;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calendar-plugin__delete {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary, #888);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.calendar-plugin__delete:hover {
+  background: var(--bg-hover, rgba(127, 127, 127, 0.15));
+  color: var(--text-primary, inherit);
+}
+
+.calendar-plugin__delete:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.calendar-plugin code {
+  font-size: 0.85em;
+  padding: 0.1em 0.3em;
+  border-radius: 4px;
+  background: var(--bg-secondary, rgba(127, 127, 127, 0.1));
+}

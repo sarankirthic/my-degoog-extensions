@@ -1,0 +1,9 @@
+<!--
+  The agenda list and confirmation card are built dynamically in
+  lib/render.js (list length and event count vary per query, which doesn't
+  map cleanly onto a single static {{placeholder}} template). This file is
+  kept as the plugin's declared template.html per convention, and is where
+  static wrapper markup would go if the panel ever needs a stable outer
+  shell (e.g. a header bar) beyond what render.js already produces.
+-->
+{{content}}
